@@ -1,0 +1,12 @@
+services:
+  pdf-sorter:
+    build: .
+    ports:
+      - "8090:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
