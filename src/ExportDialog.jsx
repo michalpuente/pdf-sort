@@ -93,7 +93,7 @@ export default function ExportDialog({ files, pages, selected, isBlank, outName,
           const fd = new FormData();
           fd.append('file', new Blob([original], { type: 'application/pdf' }), partName(i));
           fd.append('options', JSON.stringify({ ...opts, strip, password }));
-          const res = await fetch('/api/optimize', { method: 'POST', body: fd, signal: abort.signal });
+          const res = await fetch(`${import.meta.env.BASE_URL}api/optimize`, { method: 'POST', body: fd, signal: abort.signal });
           if (!res.ok) {
             const text = await res.text();
             let msg = text;

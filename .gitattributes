@@ -1,0 +1,2 @@
+# Keep LF everywhere so configs and Dockerfiles behave the same on Windows, macOS and Linux
+* text=auto eol=lf

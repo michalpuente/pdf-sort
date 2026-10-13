@@ -30,7 +30,7 @@ export default function App() {
   const docCache = useRef(new Map());
 
   useEffect(() => {
-    fetch('/api/health')
+    fetch(`${import.meta.env.BASE_URL}api/health`)
       .then((r) => setBackend(r.ok))
       .catch(() => setBackend(false));
   }, []);

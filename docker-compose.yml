@@ -2,7 +2,7 @@ services:
   pdf-sorter:
     build: .
     ports:
-      - "8090:80"
+      - "8092:80"
     depends_on:
       - backend
     restart: unless-stopped
