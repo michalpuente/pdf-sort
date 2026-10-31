@@ -1,6 +1,6 @@
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { PDFDocument, degrees } from 'pdf-lib';
+import { PDFDocument, degrees, rgb } from 'pdf-lib';
 import { jpegOrientation } from './exif.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -27,8 +27,96 @@ export async function renderPage(doc, pageNumber, { width, height, rotation = 0 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   // 'print' intent skips requestAnimationFrame, which never fires in a background tab and would stall loading
   await page.render({ canvasContext: ctx, viewport, intent: 'print' }).promise;
+  // kept for mapping clicks on the canvas back to PDF coordinates (eraser)
+  canvas.viewport = viewport;
   return canvas;
 }
+
+// Paints erased areas ([{ pdf: [x1, y1, x2, y2], color: '#rrggbb' }], PDF user space) onto a rendered canvas
+export function paintMasks(canvas, masks) {
+  const ctx = canvas.getContext('2d');
+  for (const m of masks ?? []) {
+    const [x1, y1, x2, y2] = canvas.viewport.convertToViewportRectangle(m.pdf);
+    ctx.fillStyle = m.color;
+    ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+  }
+  return canvas;
+}
+
+// Paper colour around a rectangle (canvas pixels): per-channel median of a ring just outside it.
+// Scans are rarely pure white, so a white patch would show as a visible box.
+export function sampleBackground(canvas, [x, y, w, h], ring = 8) {
+  const x0 = Math.max(0, Math.floor(x - ring)), y0 = Math.max(0, Math.floor(y - ring));
+  const x1 = Math.min(canvas.width, Math.ceil(x + w + ring)), y1 = Math.min(canvas.height, Math.ceil(y + h + ring));
+  if (x1 <= x0 || y1 <= y0) return '#ffffff';
+  const data = canvas.getContext('2d').getImageData(x0, y0, x1 - x0, y1 - y0).data;
+  const ch = [[], [], []];
+  for (let yy = y0; yy < y1; yy++) {
+    for (let xx = x0; xx < x1; xx++) {
+      if (xx >= x && xx < x + w && yy >= y && yy < y + h) continue;
+      const j = ((yy - y0) * (x1 - x0) + (xx - x0)) * 4;
+      ch[0].push(data[j]); ch[1].push(data[j + 1]); ch[2].push(data[j + 2]);
+    }
+  }
+  if (!ch[0].length) return '#ffffff';
+  const med = (a) => a.sort((p, q) => p - q)[a.length >> 1];
+  return '#' + ch.map((a) => med(a).toString(16).padStart(2, '0')).join('');
+}
+
+// Fresh thumbnail of a page with its erased areas painted in
+export async function maskedThumbnail(doc, pageNumber, masks) {
+  const canvas = await renderPage(doc, pageNumber, { width: THUMB_WIDTH });
+  return paintMasks(canvas, masks).toDataURL('image/jpeg', 0.75);
+}
+
+// Tilt of a scanned page in degrees, counter-clockwise as seen on screen (0 when it can't tell).
+// Projection profile: text lines give the sharpest row histogram when the projection angle matches their tilt.
+export async function detectSkew(doc, pageNumber, maxAngle = 5) {
+  const canvas = await renderPage(doc, pageNumber, { width: 1000 });
+  const { width: w, height: h } = canvas;
+  const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const hist = new Uint32Array(256);
+  const lum = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < lum.length; i++, j += 4) {
+    lum[i] = (data[j] * 299 + data[j + 1] * 587 + data[j + 2] * 114) / 1000;
+    hist[lum[i]]++;
+  }
+  // paper = the bright tone covering most of the page; it also fills the corners uncovered by straightening
+  let acc = 0, bg = 255;
+  for (let v = 255; v >= 0; v--) {
+    acc += hist[v];
+    if (acc >= lum.length * 0.4) { bg = v; break; }
+  }
+  const paperPx = [0, 0, 0];
+  let paperN = 0;
+  for (let i = 0, j = 0; i < lum.length; i += 7, j += 28) {
+    if (Math.abs(lum[i] - bg) <= 6) { paperPx[0] += data[j]; paperPx[1] += data[j + 1]; paperPx[2] += data[j + 2]; paperN++; }
+  }
+  const paper = paperN ? '#' + paperPx.map((v) => Math.round(v / paperN).toString(16).padStart(2, '0')).join('') : '#ffffff';
+  // ink points, skipping the margins (scanner edges, punch holes)
+  const mx = Math.round(w * 0.04), my = Math.round(h * 0.04);
+  const xs = [], ys = [];
+  for (let y = my; y < h - my; y++) for (let x = mx; x < w - mx; x++) if (lum[y * w + x] < bg - 60) { xs.push(x); ys.push(y); }
+  if (xs.length < 300 || bg < 120) return { angle: 0, paper };
+  const step = Math.max(1, Math.floor(xs.length / 60000));
+  const bins = new Float64Array(h * 2 + w);
+  const score = (deg) => {
+    const t = (deg * Math.PI) / 180, sn = Math.sin(t), cs = Math.cos(t);
+    bins.fill(0);
+    for (let i = 0; i < xs.length; i += step) bins[Math.round(ys[i] * cs + xs[i] * sn) + w]++;
+    let sq = 0;
+    for (let i = 0; i < bins.length; i++) sq += bins[i] * bins[i];
+    return sq;
+  };
+  let best = 0, bestS = score(0);
+  for (let a = -maxAngle; a <= maxAngle + 1e-9; a += 0.2) { const sc = score(a); if (sc > bestS) { bestS = sc; best = a; } }
+  for (let a = best - 0.2; a <= best + 0.2 + 1e-9; a += 0.02) { const sc = score(a); if (sc > bestS) { bestS = sc; best = a; } }
+  // no clear gain over "as is" - flat page, photo or too little text
+  if (bestS < score(0) * 1.03) return { angle: 0, paper };
+  return { angle: Math.round(best * 100) / 100, paper };
+}
+
+const hexRgb = (hex) => rgb(...[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255));
 
 function isBlankCanvas(canvas) {
   const { width: w, height: h } = canvas;
@@ -116,7 +204,31 @@ export async function buildPdf(files, pages) {
     }
     const [copied] = await out.copyPages(sources.get(p.fileIdx), [p.pageIndex]);
     if (p.rotation) copied.setRotation(degrees((copied.getRotation().angle + p.rotation) % 360));
-    out.addPage(copied);
+    // Erased areas: filled rectangles drawn over the page (the scan itself stays untouched underneath)
+    for (const m of p.masks ?? []) {
+      const [x1, y1, x2, y2] = m.pdf;
+      copied.drawRectangle({ x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1), color: hexRgb(m.color), borderWidth: 0 });
+    }
+    if (!p.skew) {
+      out.addPage(copied);
+      continue;
+    }
+    // Straightening: the page (with its erased areas) becomes a form drawn rotated about the centre of a page of
+    // the same size; the corners it uncovers are filled with the paper colour
+    const box = copied.getMediaBox();
+    const embedded = await out.embedPage(copied);
+    const page = out.addPage([box.width, box.height]);
+    const t = (-p.skew * Math.PI) / 180;
+    const cx = box.width / 2, cy = box.height / 2;
+    page.drawRectangle({ x: 0, y: 0, width: box.width, height: box.height, color: hexRgb(p.paper ?? '#ffffff'), borderWidth: 0 });
+    page.drawPage(embedded, {
+      x: cx - (cx * Math.cos(t) - cy * Math.sin(t)),
+      y: cy - (cx * Math.sin(t) + cy * Math.cos(t)),
+      width: box.width,
+      height: box.height,
+      rotate: degrees(-p.skew),
+    });
+    page.setRotation(copied.getRotation());
   }
   return out.save();
 }

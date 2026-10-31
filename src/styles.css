@@ -189,3 +189,16 @@ button.active { background: #eef3ff; border-color: var(--accent); color: var(--a
 .compare-pane { height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: #e5e7eb; }
 .compare-pane canvas { display: block; }
 @media (max-width: 700px) { .compare-panes { grid-template-columns: minmax(0, 1fr); } .compare-pane { height: 35vh; } }
+
+/* eraser + straightening */
+.preview-page { position: relative; transition: transform .15s; }
+.preview-page.erasing { cursor: crosshair; touch-action: none; user-select: none; }
+.preview-page .mask { position: absolute; pointer-events: none; }
+.preview-page.erasing .mask { outline: 1px dashed rgba(255,80,80,.8); }
+.mask-draft { position: absolute; border: 2px dashed #ff5050; background: rgba(255,80,80,.15); pointer-events: none; }
+.erase-bar { font-size: 13px; }
+.mask-color { display: inline-flex; align-items: center; gap: 4px; }
+.mask-color input { width: 28px; height: 22px; padding: 0; border: 0; background: none; }
+.skew-ctl { display: inline-flex; align-items: center; gap: 4px; }
+.skew-ctl span { min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
+.badge-edit { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: rgba(80,140,255,.15); white-space: nowrap; }
