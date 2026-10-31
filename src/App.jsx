@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { imageToPdf, openPdf, renderThumbnails } from './pdf.js';
+import { detectSkew, imageToPdf, openPdf, renderThumbnails } from './pdf.js';
 import { makePage } from './model.js';
 import DuplexDialog from './DuplexDialog.jsx';
 import ExportDialog from './ExportDialog.jsx';
@@ -25,12 +25,13 @@ export default function App() {
   const [fileHover, setFileHover] = useState(false);
   const [dialog, setDialog] = useState(null); // 'duplex' | 'export'
   const [preview, setPreview] = useState(null); // index into pages
+  const [previewErase, setPreviewErase] = useState(false);
   const [backend, setBackend] = useState(false);
   const inputRef = useRef(null);
   const docCache = useRef(new Map());
 
   useEffect(() => {
-    fetch('/api/health')
+    fetch(`${import.meta.env.BASE_URL}api/health`)
       .then((r) => setBackend(r.ok))
       .catch(() => setBackend(false));
   }, []);
@@ -95,6 +96,34 @@ export default function App() {
     updatePages((prev) => prev.filter((p) => !ids.has(p.id)));
     setSelected((prev) => new Set([...prev].filter((id) => !ids.has(id))));
   };
+  // Erased areas of one output page (+ its thumbnail with them painted in)
+  const setMasks = (id, masks, thumb) => updatePages((prev) => prev.map((p) => (p.id === id ? { ...p, masks, thumb } : p)));
+  const setSkew = (id, skew) => updatePages((prev) => prev.map((p) => (p.id === id ? { ...p, skew } : p)));
+
+  // Straightens the selected pages (all when nothing is selected): measures each page's tilt, one undo step for all
+  async function straighten() {
+    const target = selected.size ? pages.filter((p) => selected.has(p.id)) : pages;
+    const found = new Map();
+    try {
+      for (let i = 0; i < target.length; i++) {
+        setLoading(`Prostowanie stron (${i + 1}/${target.length})…`);
+        const p = target[i];
+        const { angle, paper } = await detectSkew(await getDoc(p.fileIdx), p.pageIndex + 1);
+        // below ~0.15° nobody sees the tilt - leave such pages untouched
+        found.set(p.id, Math.abs(angle) >= 0.15 ? { skew: angle, paper } : { skew: 0 });
+      }
+    } finally {
+      setLoading(null);
+    }
+    updatePages((prev) => prev.map((p) => (found.has(p.id) ? { ...p, ...found.get(p.id) } : p)));
+    const n = [...found.values()].filter((v) => v.skew).length;
+    alert(n ? `Wyprostowano ${n} z ${found.size} stron. Kąt możesz poprawić w podglądzie (🔍).` : 'Żadna strona nie wymagała prostowania.');
+  }
+  const openPreview = (i, erase = false) => {
+    setPreviewErase(erase);
+    setPreview(i);
+  };
+
   const blankCount = pages.filter(isBlank).length;
   const removeBlanks = () => removeIds(new Set(pages.filter(isBlank).map((p) => p.id)));
 
@@ -226,6 +255,13 @@ export default function App() {
         <button disabled={!blankCount} onClick={removeBlanks} title="Usuwa strony rozpoznane jako puste">
           Usuń puste ({blankCount})
         </button>
+        <button
+          disabled={!pages.length || !!loading}
+          onClick={straighten}
+          title="Wykrywa lekko krzywe skany i prostuje je (zaznaczone strony albo wszystkie)"
+        >
+          📐 Wyprostuj {selected.size ? `zaznaczone (${selected.size})` : 'strony'}
+        </button>
         <button disabled={!hist.past.length} onClick={undo} title="Cofnij (Ctrl+Z)">
           ↶
         </button>
@@ -289,6 +325,9 @@ export default function App() {
           onClose={() => setPreview(null)}
           onNavigate={setPreview}
           onRotate={(id) => rotateIds(new Set([id]))}
+          onMasks={setMasks}
+          onSkew={setSkew}
+          startErasing={previewErase}
         />
       )}
 
@@ -366,7 +405,7 @@ export default function App() {
                 }
                 draggable
                 onClick={(e) => onCardClick(e, p)}
-                onDoubleClick={() => setPreview(i)}
+                onDoubleClick={() => openPreview(i)}
                 onDragStart={(e) => {
                   const ids = selected.has(p.id) ? pages.filter((x) => selected.has(x.id)).map((x) => x.id) : [p.id];
                   setDrag({ kind: 'out', ids });
@@ -390,9 +429,9 @@ export default function App() {
               >
                 <div className="thumb">
                   <img
-                    src={files[p.fileIdx].thumbs[p.pageIndex]}
+                    src={p.thumb ?? files[p.fileIdx].thumbs[p.pageIndex]}
                     className={p.rotation % 180 ? 'sideways' : ''}
-                    style={{ transform: `rotate(${p.rotation}deg)` }}
+                    style={{ transform: `rotate(${p.rotation + (p.skew ?? 0)}deg)` }}
                     draggable={false}
                     alt=""
                   />
@@ -403,10 +442,15 @@ export default function App() {
                     {files.length > 1 ? `${files[p.fileIdx].name} · ` : ''}s. {p.pageIndex + 1}
                   </span>
                   {isBlank(p) && <span className="badge-blank">pusta</span>}
+                  {!!p.skew && <span className="badge-edit" title="Strona wyprostowana">📐 {Math.abs(p.skew).toFixed(1)}°</span>}
+                  {p.masks?.length > 0 && <span className="badge-edit" title="Wymazane fragmenty">🩹 {p.masks.length}</span>}
                 </div>
                 <div className="actions" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-                  <button title="Podgląd (dwuklik)" onClick={() => setPreview(i)}>
+                  <button title="Podgląd (dwuklik)" onClick={() => openPreview(i)}>
                     🔍
+                  </button>
+                  <button title="Gumka – wymaż fragment (np. numer strony)" onClick={() => openPreview(i, true)}>
+                    🩹
                   </button>
                   <button title="Obróć o 90°" onClick={() => rotateIds(new Set([p.id]))}>
                     ⟳
