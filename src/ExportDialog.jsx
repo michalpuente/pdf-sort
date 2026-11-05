@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { zipSync } from 'fflate';
-import { buildPdf, downloadBytes, formatSize, openPdf, renderPage } from './pdf.js';
+import { PAGE_FORMATS, buildPdf, downloadBytes, formatSize, openPdf, renderPage } from './pdf.js';
 import { splitParts } from './model.js';
 
 const PRESETS = {
@@ -34,6 +34,8 @@ export default function ExportDialog({ files, pages, selected, isBlank, outName,
   const [scope, setScope] = useState(selected.size > 0 ? 'selected' : 'all');
   const [everyN, setEveryN] = useState(2);
   const [ranges, setRanges] = useState('');
+  // pages from several files usually differ in size (phone scan vs. a regular PDF) - even them out by default
+  const [format, setFormat] = useState(() => (new Set(pages.map((p) => p.fileIdx)).size > 1 ? 'A4' : ''));
   const [preset, setPreset] = useState('none');
   const [opts, setOpts] = useState(PRESETS.lossless.opts);
   const [strip, setStrip] = useState(false);
@@ -85,7 +87,7 @@ export default function ExportDialog({ files, pages, selected, isBlank, outName,
       for (let i = 0; i < usable.length; i++) {
         const prefix = usable.length > 1 ? `Plik ${i + 1}/${usable.length}: ` : '';
         setStatus(prefix + 'składanie stron…');
-        const original = await buildPdf(files, usable[i]);
+        const original = await buildPdf(files, usable[i], format || null);
         let result = original;
         let note = null;
         if (optimize) {
@@ -171,6 +173,27 @@ export default function ExportDialog({ files, pages, selected, isBlank, outName,
                   (usable.length
                     ? `Powstanie ${usable.length} ${plural(usable.length)}${usable.length > 1 ? ' (spakowane w ZIP)' : ''}.`
                     : 'Brak stron do zapisania.')}
+              </p>
+            </fieldset>
+
+            <fieldset>
+              <legend>Format stron</legend>
+              <label className="inline">
+                Rozmiar
+                <select value={format} onChange={(e) => setFormat(e.target.value)}>
+                  <option value="">bez zmian (każda strona jak w oryginale)</option>
+                  {Object.keys(PAGE_FORMATS).map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                  <option value="first">jak pierwsza strona</option>
+                </select>
+              </label>
+              <p className="hint">
+                {format
+                  ? 'Każda strona jest skalowana do tego rozmiaru i wyśrodkowana, bez przycinania. Pionowe zostają pionowe, poziome poziome.'
+                  : 'Skan z telefonu i zwykły PDF mogą mieć bardzo różne rozmiary – wybierz np. A4, żeby wszystkie strony były równe.'}
               </p>
             </fieldset>
 

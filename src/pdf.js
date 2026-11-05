@@ -195,8 +195,21 @@ export async function imageToPdf(file) {
   return doc.save();
 }
 
-export async function buildPdf(files, pages) {
+// Page formats in PDF points (portrait); orientation follows each page
+export const PAGE_FORMATS = {
+  A4: [595.28, 841.89],
+  A5: [419.53, 595.28],
+  A3: [841.89, 1190.55],
+  Letter: [612, 792],
+};
+
+/**
+ * format: null (pages as they are), a key of PAGE_FORMATS, or 'first' (every page the size of the first one).
+ * With a format, each page is scaled to fit and centred; margins left over get the page's paper colour.
+ */
+export async function buildPdf(files, pages, format = null) {
   const out = await PDFDocument.create();
+  let target = format && format !== 'first' ? PAGE_FORMATS[format] : null;
   const sources = new Map();
   for (const p of pages) {
     if (!sources.has(p.fileIdx)) {
@@ -211,6 +224,7 @@ export async function buildPdf(files, pages) {
     }
     if (!p.skew) {
       out.addPage(copied);
+      if (format) target = await fitLast(out, target, p.paper);
       continue;
     }
     // Straightening: the page (with its erased areas) becomes a form drawn rotated about the centre of a page of
@@ -229,8 +243,31 @@ export async function buildPdf(files, pages) {
       rotate: degrees(-p.skew),
     });
     page.setRotation(copied.getRotation());
+    if (format) target = await fitLast(out, target, p.paper);
   }
   return out.save();
+}
+
+// Replaces the last page of `out` with one of `target` size (oriented like the page as displayed) holding the page
+// scaled to fit and centred. Without a target (format 'first') the first page sets it. Returns the target.
+async function fitLast(out, target, paper) {
+  const i = out.getPageCount() - 1;
+  const src = out.getPage(i);
+  const rot = ((src.getRotation().angle % 360) + 360) % 360;
+  const { width: w, height: h } = src.getMediaBox();
+  const [dw, dh] = rot % 180 ? [h, w] : [w, h];
+  if (!target) return [Math.min(dw, dh), Math.max(dw, dh)];
+  const [TW, TH] = dw > dh ? [Math.max(...target), Math.min(...target)] : [Math.min(...target), Math.max(...target)];
+  const s = Math.min(TW / dw, TH / dh);
+  const ox = (TW - dw * s) / 2, oy = (TH - dh * s) / 2;
+  const embedded = await out.embedPage(src);
+  out.removePage(i);
+  const page = out.addPage([TW, TH]);
+  page.drawRectangle({ x: 0, y: 0, width: TW, height: TH, color: hexRgb(paper ?? '#ffffff'), borderWidth: 0 });
+  // /Rotate turns clockwise, drawPage's rotate counter-clockwise; the offsets put the rotated page back on (ox, oy)
+  const at = { 0: [ox, oy], 90: [ox, oy + w * s], 180: [ox + w * s, oy + h * s], 270: [ox + h * s, oy] }[rot];
+  page.drawPage(embedded, { x: at[0], y: at[1], width: w * s, height: h * s, rotate: degrees(-rot) });
+  return target;
 }
 
 export function downloadBytes(bytes, name, type = 'application/pdf') {
